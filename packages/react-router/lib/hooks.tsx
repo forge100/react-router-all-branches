@@ -10,6 +10,7 @@ import type {
   PathPattern,
   RelativeRoutingType,
   Router as RemixRouter,
+  RevalidationState,
   To,
 } from "@remix-run/router";
 import {
@@ -149,6 +150,23 @@ export interface NavigateFunction {
   (delta: number): void;
 }
 
+const navigateEffectWarning =
+  `You should call navigate() in a React.useEffect(), not when ` +
+  `your component is first rendered.`;
+
+// Mute warnings for calls to useNavigate in SSR environments
+function useIsomorphicLayoutEffect(
+  cb: Parameters<typeof React.useLayoutEffect>[0]
+) {
+  let isStatic = React.useContext(NavigationContext).static;
+  if (!isStatic) {
+    // We should be able to get rid of this once react 18.3 is released
+    // See: https://github.com/facebook/react/pull/26395
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    React.useLayoutEffect(cb);
+  }
+}
+
 /**
  * Returns an imperative method for changing the location. Used by <Link>s, but
  * may also be used by other elements to change the location.
@@ -156,10 +174,10 @@ export interface NavigateFunction {
  * @see https://reactrouter.com/hooks/use-navigate
  */
 export function useNavigate(): NavigateFunction {
-  let isDataRouter = React.useContext(DataRouterContext) != null;
+  let { isDataRoute } = React.useContext(RouteContext);
   // Conditional usage is OK here because the usage of a data router is static
   // eslint-disable-next-line react-hooks/rules-of-hooks
-  return isDataRouter ? useNavigateStable() : useNavigateUnstable();
+  return isDataRoute ? useNavigateStable() : useNavigateUnstable();
 }
 
 function useNavigateUnstable(): NavigateFunction {
@@ -179,18 +197,16 @@ function useNavigateUnstable(): NavigateFunction {
   );
 
   let activeRef = React.useRef(false);
-  React.useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     activeRef.current = true;
   });
 
   let navigate: NavigateFunction = React.useCallback(
     (to: To | number, options: NavigateOptions = {}) => {
-      warning(
-        activeRef.current,
-        `You should call navigate() in a React.useEffect(), not when ` +
-          `your component is first rendered.`
-      );
+      warning(activeRef.current, navigateEffectWarning);
 
+      // Short circuit here since if this happens on first render the navigate
+      // is useless because we haven't wired up our history listener yet
       if (!activeRef.current) return;
 
       if (typeof to === "number") {
@@ -311,6 +327,15 @@ export function useRoutes(
   routes: RouteObject[],
   locationArg?: Partial<Location> | string
 ): React.ReactElement | null {
+  return useRoutesImpl(routes, locationArg);
+}
+
+// Internal implementation with accept optional param for RouterProvider usage
+export function useRoutesImpl(
+  routes: RouteObject[],
+  locationArg?: Partial<Location> | string,
+  dataRouterState?: RemixRouter["state"]
+): React.ReactElement | null {
   invariant(
     useInRouterContext(),
     // TODO: This error is probably because they somehow have 2 versions of the
@@ -319,7 +344,6 @@ export function useRoutes(
   );
 
   let { navigator } = React.useContext(NavigationContext);
-  let dataRouterStateContext = React.useContext(DataRouterStateContext);
   let { matches: parentMatches } = React.useContext(RouteContext);
   let routeMatch = parentMatches[parentMatches.length - 1];
   let parentParams = routeMatch ? routeMatch.params : {};
@@ -432,7 +456,7 @@ export function useRoutes(
         })
       ),
     parentMatches,
-    dataRouterStateContext || undefined
+    dataRouterState
   );
 
   // When a user passes in a `locationArg`, the associated routes need to
@@ -506,6 +530,7 @@ const defaultErrorElement = <DefaultErrorComponent />;
 
 type RenderErrorBoundaryProps = React.PropsWithChildren<{
   location: Location;
+  revalidation: RevalidationState;
   error: any;
   component: React.ReactNode;
   routeContext: RouteContextObject;
@@ -513,6 +538,7 @@ type RenderErrorBoundaryProps = React.PropsWithChildren<{
 
 type RenderErrorBoundaryState = {
   location: Location;
+  revalidation: RevalidationState;
   error: any;
 };
 
@@ -524,6 +550,7 @@ export class RenderErrorBoundary extends React.Component<
     super(props);
     this.state = {
       location: props.location,
+      revalidation: props.revalidation,
       error: props.error,
     };
   }
@@ -544,10 +571,14 @@ export class RenderErrorBoundary extends React.Component<
     // Whether we're in an error state or not, we update the location in state
     // so that when we are in an error state, it gets reset when a new location
     // comes in and the user recovers from the error.
-    if (state.location !== props.location) {
+    if (
+      state.location !== props.location ||
+      (state.revalidation !== "idle" && props.revalidation === "idle")
+    ) {
       return {
         error: props.error,
         location: props.location,
+        revalidation: props.revalidation,
       };
     }
 
@@ -558,6 +589,7 @@ export class RenderErrorBoundary extends React.Component<
     return {
       error: props.error || state.error,
       location: state.location,
+      revalidation: props.revalidation || state.revalidation,
     };
   }
 
@@ -613,7 +645,7 @@ function RenderedRoute({ routeContext, match, children }: RenderedRouteProps) {
 export function _renderMatches(
   matches: RouteMatch[] | null,
   parentMatches: RouteMatch[] = [],
-  dataRouterState?: RemixRouter["state"]
+  dataRouterState: RemixRouter["state"] | null = null
 ): React.ReactElement | null {
   if (matches == null) {
     if (dataRouterState?.errors) {
@@ -635,7 +667,9 @@ export function _renderMatches(
     );
     invariant(
       errorIndex >= 0,
-      `Could not find a matching route for the current errors: ${errors}`
+      `Could not find a matching route for errors on route IDs: ${Object.keys(
+        errors
+      ).join(",")}`
     );
     renderedMatches = renderedMatches.slice(
       0,
@@ -655,6 +689,14 @@ export function _renderMatches(
       let children: React.ReactNode;
       if (error) {
         children = errorElement;
+      } else if (match.route.Component) {
+        // Note: This is a de-optimized path since React won't re-use the
+        // ReactElement since it's identity changes with each new
+        // React.createElement call.  We keep this so folks can use
+        // `<Route Component={...}>` in `<Routes>` but generally `Component`
+        // usage is only advised in `RouterProvider` when we can convert it to
+        // `element` ahead of time.
+        children = <match.route.Component />;
       } else if (match.route.element) {
         children = match.route.element;
       } else {
@@ -663,7 +705,11 @@ export function _renderMatches(
       return (
         <RenderedRoute
           match={match}
-          routeContext={{ outlet, matches }}
+          routeContext={{
+            outlet,
+            matches,
+            isDataRoute: dataRouterState != null,
+          }}
           children={children}
         />
       );
@@ -675,10 +721,11 @@ export function _renderMatches(
       (match.route.ErrorBoundary || match.route.errorElement || index === 0) ? (
       <RenderErrorBoundary
         location={dataRouterState.location}
+        revalidation={dataRouterState.revalidation}
         component={errorElement}
         error={error}
         children={getChildren()}
-        routeContext={{ outlet: null, matches }}
+        routeContext={{ outlet: null, matches, isDataRoute: true }}
       />
     ) : (
       getChildren()
@@ -911,8 +958,19 @@ function useNavigateStable(): NavigateFunction {
   let { router } = useDataRouterContext(DataRouterHook.UseNavigateStable);
   let id = useCurrentRouteId(DataRouterStateHook.UseNavigateStable);
 
+  let activeRef = React.useRef(false);
+  useIsomorphicLayoutEffect(() => {
+    activeRef.current = true;
+  });
+
   let navigate: NavigateFunction = React.useCallback(
     (to: To | number, options: NavigateOptions = {}) => {
+      warning(activeRef.current, navigateEffectWarning);
+
+      // Short circuit here since if this happens on first render the navigate
+      // is useless because we haven't wired up our router subscriber yet
+      if (!activeRef.current) return;
+
       if (typeof to === "number") {
         router.navigate(to);
       } else {

@@ -7,6 +7,7 @@ import {
   Route,
   useNavigate,
   useLocation,
+  useRoutes,
   createMemoryRouter,
   createRoutesFromElements,
   Outlet,
@@ -299,6 +300,383 @@ describe("useNavigate", () => {
     ).toThrowErrorMatchingInlineSnapshot(
       `"Cannot include a '#' character in a manually specified \`to.search\` field [{"pathname":"/about/thing","search":"?search#hash"}].  Please separate it out to the \`to.hash\` field. Alternatively you may provide the full path as a string in <Link to="..."> and the router will parse it for you."`
     );
+  });
+
+  it("allows useNavigate usage in a mixed RouterProvider/<Routes> scenario", () => {
+    const router = createMemoryRouter([
+      {
+        path: "/*",
+        Component() {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          let navigate = useNavigate();
+          let location = useLocation();
+          return (
+            <>
+              <button
+                onClick={() =>
+                  navigate(location.pathname === "/" ? "/page" : "/")
+                }
+              >
+                Navigate from RouterProvider
+              </button>
+              <Routes>
+                <Route path="/" element={<Home />} />
+                <Route path="/page" element={<Page />} />
+              </Routes>
+            </>
+          );
+        },
+      },
+    ]);
+
+    function Home() {
+      let navigate = useNavigate();
+      return (
+        <>
+          <h1>Home</h1>
+          <button onClick={() => navigate("/page")}>
+            Navigate /page from Routes
+          </button>
+        </>
+      );
+    }
+
+    function Page() {
+      let navigate = useNavigate();
+      return (
+        <>
+          <h1>Page</h1>
+          <button onClick={() => navigate("/")}>
+            Navigate /home from Routes
+          </button>
+        </>
+      );
+    }
+
+    let renderer: TestRenderer.ReactTestRenderer;
+    TestRenderer.act(() => {
+      renderer = TestRenderer.create(<RouterProvider router={router} />);
+    });
+
+    expect(router.state.location.pathname).toBe("/");
+    expect(renderer.toJSON()).toMatchInlineSnapshot(`
+      [
+        <button
+          onClick={[Function]}
+        >
+          Navigate from RouterProvider
+        </button>,
+        <h1>
+          Home
+        </h1>,
+        <button
+          onClick={[Function]}
+        >
+          Navigate /page from Routes
+        </button>,
+      ]
+    `);
+
+    let button = renderer.root.findByProps({
+      children: "Navigate from RouterProvider",
+    });
+    TestRenderer.act(() => button.props.onClick());
+
+    expect(router.state.location.pathname).toBe("/page");
+    expect(renderer.toJSON()).toMatchInlineSnapshot(`
+      [
+        <button
+          onClick={[Function]}
+        >
+          Navigate from RouterProvider
+        </button>,
+        <h1>
+          Page
+        </h1>,
+        <button
+          onClick={[Function]}
+        >
+          Navigate /home from Routes
+        </button>,
+      ]
+    `);
+
+    button = renderer.root.findByProps({
+      children: "Navigate from RouterProvider",
+    });
+    TestRenderer.act(() => button.props.onClick());
+
+    expect(router.state.location.pathname).toBe("/");
+    expect(renderer.toJSON()).toMatchInlineSnapshot(`
+      [
+        <button
+          onClick={[Function]}
+        >
+          Navigate from RouterProvider
+        </button>,
+        <h1>
+          Home
+        </h1>,
+        <button
+          onClick={[Function]}
+        >
+          Navigate /page from Routes
+        </button>,
+      ]
+    `);
+
+    button = renderer.root.findByProps({
+      children: "Navigate /page from Routes",
+    });
+    TestRenderer.act(() => button.props.onClick());
+
+    expect(router.state.location.pathname).toBe("/page");
+    expect(renderer.toJSON()).toMatchInlineSnapshot(`
+      [
+        <button
+          onClick={[Function]}
+        >
+          Navigate from RouterProvider
+        </button>,
+        <h1>
+          Page
+        </h1>,
+        <button
+          onClick={[Function]}
+        >
+          Navigate /home from Routes
+        </button>,
+      ]
+    `);
+
+    button = renderer.root.findByProps({
+      children: "Navigate /home from Routes",
+    });
+    TestRenderer.act(() => button.props.onClick());
+
+    expect(router.state.location.pathname).toBe("/");
+    expect(renderer.toJSON()).toMatchInlineSnapshot(`
+      [
+        <button
+          onClick={[Function]}
+        >
+          Navigate from RouterProvider
+        </button>,
+        <h1>
+          Home
+        </h1>,
+        <button
+          onClick={[Function]}
+        >
+          Navigate /page from Routes
+        </button>,
+      ]
+    `);
+  });
+
+  describe("navigating in effects versus render", () => {
+    let warnSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    describe("MemoryRouter", () => {
+      it("does not allow navigation from the render cycle", () => {
+        let renderer: TestRenderer.ReactTestRenderer;
+        TestRenderer.act(() => {
+          renderer = TestRenderer.create(
+            <MemoryRouter>
+              <Routes>
+                <Route index element={<Home />} />
+                <Route path="about" element={<h1>About</h1>} />
+              </Routes>
+            </MemoryRouter>
+          );
+        });
+
+        function Home() {
+          let navigate = useNavigate();
+          navigate("/about");
+          return <h1>Home</h1>;
+        }
+
+        // @ts-expect-error
+        expect(renderer.toJSON()).toMatchInlineSnapshot(`
+          <h1>
+            Home
+          </h1>
+        `);
+        expect(warnSpy).toHaveBeenCalledWith(
+          "You should call navigate() in a React.useEffect(), not when your component is first rendered."
+        );
+      });
+
+      it("allows navigation from effects", () => {
+        let renderer: TestRenderer.ReactTestRenderer;
+        TestRenderer.act(() => {
+          renderer = TestRenderer.create(
+            <MemoryRouter>
+              <Routes>
+                <Route index element={<Home />} />
+                <Route path="about" element={<h1>About</h1>} />
+              </Routes>
+            </MemoryRouter>
+          );
+        });
+
+        function Home() {
+          let navigate = useNavigate();
+          React.useEffect(() => navigate("/about"), [navigate]);
+          return <h1>Home</h1>;
+        }
+
+        // @ts-expect-error
+        expect(renderer.toJSON()).toMatchInlineSnapshot(`
+          <h1>
+            About
+          </h1>
+        `);
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("allows navigation in child useEffects", () => {
+        let renderer: TestRenderer.ReactTestRenderer;
+        TestRenderer.act(() => {
+          renderer = TestRenderer.create(
+            <MemoryRouter initialEntries={["/home"]}>
+              <Routes>
+                <Route path="home" element={<Parent />} />
+                <Route path="about" element={<h1>About</h1>} />
+              </Routes>
+            </MemoryRouter>
+          );
+        });
+
+        function Parent() {
+          let navigate = useNavigate();
+          let onChildRendered = React.useCallback(
+            () => navigate("/about"),
+            [navigate]
+          );
+          return <Child onChildRendered={onChildRendered} />;
+        }
+
+        function Child({ onChildRendered }) {
+          React.useEffect(() => onChildRendered());
+          return null;
+        }
+
+        // @ts-expect-error
+        expect(renderer.toJSON()).toMatchInlineSnapshot(`
+          <h1>
+            About
+          </h1>
+        `);
+      });
+    });
+
+    describe("RouterProvider", () => {
+      it("does not allow navigation from the render cycle", async () => {
+        let router = createMemoryRouter([
+          {
+            index: true,
+            Component() {
+              let navigate = useNavigate();
+              navigate("/about");
+              return <h1>Home</h1>;
+            },
+          },
+          {
+            path: "about",
+            element: <h1>About</h1>,
+          },
+        ]);
+        let renderer: TestRenderer.ReactTestRenderer;
+        TestRenderer.act(() => {
+          renderer = TestRenderer.create(<RouterProvider router={router} />);
+        });
+
+        // @ts-expect-error
+        expect(renderer.toJSON()).toMatchInlineSnapshot(`
+          <h1>
+            Home
+          </h1>
+        `);
+        expect(warnSpy).toHaveBeenCalledWith(
+          "You should call navigate() in a React.useEffect(), not when your component is first rendered."
+        );
+      });
+
+      it("allows navigation from effects", () => {
+        let router = createMemoryRouter([
+          {
+            index: true,
+            Component() {
+              let navigate = useNavigate();
+              React.useEffect(() => navigate("/about"), [navigate]);
+              return <h1>Home</h1>;
+            },
+          },
+          {
+            path: "about",
+            element: <h1>About</h1>,
+          },
+        ]);
+        let renderer: TestRenderer.ReactTestRenderer;
+        TestRenderer.act(() => {
+          renderer = TestRenderer.create(<RouterProvider router={router} />);
+        });
+
+        // @ts-expect-error
+        expect(renderer.toJSON()).toMatchInlineSnapshot(`
+          <h1>
+            About
+          </h1>
+        `);
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("allows navigation in child useEffects", () => {
+        let router = createMemoryRouter([
+          {
+            index: true,
+            Component() {
+              let navigate = useNavigate();
+              let onChildRendered = React.useCallback(
+                () => navigate("/about"),
+                [navigate]
+              );
+              return <Child onChildRendered={onChildRendered} />;
+            },
+          },
+          {
+            path: "about",
+            element: <h1>About</h1>,
+          },
+        ]);
+        let renderer: TestRenderer.ReactTestRenderer;
+        TestRenderer.act(() => {
+          renderer = TestRenderer.create(<RouterProvider router={router} />);
+        });
+
+        function Child({ onChildRendered }) {
+          React.useEffect(() => onChildRendered());
+          return null;
+        }
+
+        // @ts-expect-error
+        expect(renderer.toJSON()).toMatchInlineSnapshot(`
+          <h1>
+            About
+          </h1>
+        `);
+      });
+    });
   });
 
   describe("with state", () => {

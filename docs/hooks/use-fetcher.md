@@ -216,9 +216,9 @@ function TaskCheckbox({ task }) {
       <button
         type="submit"
         name="status"
-        value={isComplete ? "incomplete" : "complete"}
+        value={isComplete ? "complete" : "incomplete"}
       >
-        {isComplete ? "Mark Incomplete" : "Mark Complete"}
+        {isComplete ? "Mark Complete" : "Mark Incomplete"}
       </button>
     </fetcher.Form>
   );

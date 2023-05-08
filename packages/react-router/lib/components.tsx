@@ -5,10 +5,10 @@ import type {
   Location,
   MemoryHistory,
   Router as RemixRouter,
-  RouterState,
   To,
   LazyRouteFunction,
   RelativeRoutingType,
+  RouterState,
 } from "@remix-run/router";
 import {
   Action as NavigationType,
@@ -16,10 +16,11 @@ import {
   createMemoryHistory,
   UNSAFE_invariant as invariant,
   parsePath,
+  resolveTo,
   stripBasename,
   UNSAFE_warning as warning,
+  UNSAFE_getPathContributingMatches as getPathContributingMatches,
 } from "@remix-run/router";
-import { useSyncExternalStore as useSyncExternalStoreShim } from "./use-sync-external-store-shim";
 
 import type {
   DataRouteObject,
@@ -35,6 +36,7 @@ import {
   DataRouterContext,
   DataRouterStateContext,
   AwaitContext,
+  RouteContext,
 } from "./context";
 import {
   useAsyncValue,
@@ -43,6 +45,8 @@ import {
   useOutlet,
   useRoutes,
   _renderMatches,
+  useRoutesImpl,
+  useLocation,
 } from "./hooks";
 
 export interface RouterProviderProps {
@@ -57,17 +61,10 @@ export function RouterProvider({
   fallbackElement,
   router,
 }: RouterProviderProps): React.ReactElement {
-  let getState = React.useCallback(() => router.state, [router]);
-
-  // Sync router state to our component state to force re-renders
-  let state: RouterState = useSyncExternalStoreShim(
-    router.subscribe,
-    getState,
-    // We have to provide this so React@18 doesn't complain during hydration,
-    // but we pass our serialized hydration data into the router so state here
-    // is already synced with what the server saw
-    getState
-  );
+  // Need to use a layout effect here so we are subscribed early enough to
+  // pick up on any render-driven redirects/navigations (useEffect/<Navigate>)
+  let [state, setState] = React.useState(router.state);
+  React.useLayoutEffect(() => router.subscribe(setState), [router, setState]);
 
   let navigator = React.useMemo((): Navigator => {
     return {
@@ -116,13 +113,27 @@ export function RouterProvider({
             navigationType={router.state.historyAction}
             navigator={navigator}
           >
-            {router.state.initialized ? <Routes /> : fallbackElement}
+            {router.state.initialized ? (
+              <DataRoutes routes={router.routes} state={state} />
+            ) : (
+              fallbackElement
+            )}
           </Router>
         </DataRouterStateContext.Provider>
       </DataRouterContext.Provider>
       {null}
     </>
   );
+}
+
+function DataRoutes({
+  routes,
+  state,
+}: {
+  routes: DataRouteObject[];
+  state: RouterState;
+}): React.ReactElement | null {
+  return useRoutesImpl(routes, undefined, state);
 }
 
 export interface MemoryRouterProps {
@@ -207,18 +218,24 @@ export function Navigate({
       `only ever rendered in response to some user interaction or state change.`
   );
 
-  let dataRouterState = React.useContext(DataRouterStateContext);
+  let { matches } = React.useContext(RouteContext);
+  let { pathname: locationPathname } = useLocation();
   let navigate = useNavigate();
 
-  React.useEffect(() => {
-    // Avoid kicking off multiple navigations if we're in the middle of a
-    // data-router navigation, since components get re-rendered when we enter
-    // a submitting/loading state
-    if (dataRouterState && dataRouterState.navigation.state !== "idle") {
-      return;
-    }
-    navigate(to, { replace, state, relative });
-  });
+  // Resolve the path outside of the effect so that when effects run twice in
+  // StrictMode they navigate to the same place
+  let path = resolveTo(
+    to,
+    getPathContributingMatches(matches).map((match) => match.pathnameBase),
+    locationPathname,
+    relative === "path"
+  );
+  let jsonPath = JSON.stringify(path);
+
+  React.useEffect(
+    () => navigate(JSON.parse(jsonPath), { replace, state, relative }),
+    [navigate, jsonPath, relative, replace, state]
+  );
 
   return null;
 }
@@ -393,15 +410,7 @@ export function Routes({
   children,
   location,
 }: RoutesProps): React.ReactElement | null {
-  let dataRouterContext = React.useContext(DataRouterContext);
-  // When in a DataRouterContext _without_ children, we use the router routes
-  // directly.  If we have children, then we're in a descendant tree and we
-  // need to use child routes.
-  let routes =
-    dataRouterContext && !children
-      ? (dataRouterContext.router.routes as DataRouteObject[])
-      : createRoutesFromChildren(children);
-  return useRoutes(routes, location);
+  return useRoutes(createRoutesFromChildren(children), location);
 }
 
 export interface AwaitResolveRenderFunction {
