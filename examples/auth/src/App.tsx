@@ -79,6 +79,8 @@ interface AuthContextType {
 
 let AuthContext = React.createContext<AuthContextType>(null!);
 
+
+
 function AuthProvider({ children }: { children: React.ReactNode }) {
   let [user, setUser] = React.useState<any>(null);
 
