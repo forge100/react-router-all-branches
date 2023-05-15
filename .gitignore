@@ -24,3 +24,9 @@ node_modules/
 .eslintcache
 /.env
 /NOTES.md
+
+#my self jozhuare99
+.yarn
+.gitignore
+.yarnrc.yml
+yarn.lock
